@@ -12,10 +12,44 @@
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
+
+// Starfall Bastion handover checks, written for this entry: before the dossier is built, prove the
+// folder being handed in is the game that was actually playtested - the page the screenshots were
+// taken from, the module it boots, and exactly the shots the manifest promises, each small enough
+// for the scorer. A failed check stops the handover with the reason instead of shipping a folder
+// that only looks right.
+function verifyEntry(root) {
+  const problems = [];
+  const pagePath = join(root, 'game', 'index.html');
+  if (!existsSync(pagePath)) {
+    problems.push('game/index.html is missing');
+  } else {
+    const page = readFileSync(pagePath, 'utf8');
+    if (!page.includes('src/main.js')) problems.push('game/index.html does not boot src/main.js');
+    if (!page.includes('<canvas')) problems.push('game/index.html has no canvas element');
+  }
+  const manifest = JSON.parse(readFileSync(join(root, 'shots.json'), 'utf8'));
+  const shotNames = manifest.map((shot) => shot.name);
+  if (shotNames.length < 3 || shotNames.length > 4) {
+    problems.push(`shots.json promises ${shotNames.length} screenshots, outside the 3-4 the entry carries`);
+  }
+  for (const name of shotNames) {
+    const shotPath = join(root, 'screenshots', name);
+    if (!existsSync(shotPath)) {
+      problems.push(`screenshots/${name} is promised by shots.json but absent`);
+    } else if (statSync(shotPath).size > 262144) {
+      problems.push(`screenshots/${name} is over the 256 KiB screenshot cap`);
+    }
+  }
+  const stray = readdirSync(join(root, 'screenshots')).filter((name) => !shotNames.includes(name));
+  if (stray.length > 0) problems.push(`screenshots/ holds files shots.json never promised: ${stray.join(', ')}`);
+  if (problems.length > 0) throw new Error(`entry check failed:\n - ${problems.join('\n - ')}`);
+  return shotNames.length;
+}
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
@@ -29,6 +63,8 @@ if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), joi
 // scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
 // files, in all, or a path under game/ over 1000 bytes: game/ counts beside /output's own 1000-entry cap, its
 // screenshots/ and dossier.json).
+const shotCount = verifyEntry(here);
+
 writeFileSync(
   join(out, 'dossier.json'),
   buildDossier(out, {
@@ -39,3 +75,8 @@ writeFileSync(
     game_path_max_bytes: 1000,
   }),
 );
+
+// Receipt for whoever runs the handover: what was copied and how large the dossier came out, read
+// back from disk so the line reports the artifact as it stands, not as it was meant to be.
+const dossierBytes = statSync(join(out, 'dossier.json')).size;
+console.log(`starfall-bastion: handed in game/ with ${shotCount} screenshots, dossier.json ${dossierBytes} bytes`);
